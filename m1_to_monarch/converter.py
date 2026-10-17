@@ -62,16 +62,21 @@ def convert_all_data(parsed_data: Dict[str, Any]) -> Dict[str, str]:
     all_transactions: List[AccountTransaction] = []
 
     for acc in accounts:
-        # Per-account daily balance history
+        # Per-account daily balance history (always generated for Monarch)
+        bal_filename = f"m1_{acc.slug}_monarch_balance_history.csv"
         if acc.daily_balances:
-            bal_filename = f"m1_{acc.slug}_monarch_balance_history.csv"
             files[bal_filename] = balance_points_to_csv(acc.daily_balances)
+        else:
+            from datetime import datetime
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            files[bal_filename] = balance_points_to_csv([AccountBalancePoint(date=today_str, balance=0.0)])
 
         # Per-account transactions
         if acc.transactions:
             tx_filename = f"m1_{acc.slug}_monarch_transactions.csv"
             files[tx_filename] = transactions_to_csv(acc.transactions)
             all_transactions.extend(acc.transactions)
+
 
     # Combined transactions across all accounts
     if all_transactions:

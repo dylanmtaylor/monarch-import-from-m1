@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 
@@ -43,6 +44,7 @@ class AccountData:
 
 
 def parse_daily_balances(chart_data: Optional[Dict[str, Any]]) -> List[AccountBalancePoint]:
+
     """Parse daily closing balance points from rootPortfolioSlice or netWorth chartData."""
     if not chart_data or not chart_data.get("data"):
         return []
@@ -271,6 +273,74 @@ def parse_activity_item(
     return None
 
 
+def synthesize_daily_balances_from_activities(
+    acc_activities: List[Dict[str, Any]],
+    all_activities: Dict[str, List[Dict[str, Any]]],
+    max_date_str: str,
+) -> List[AccountBalancePoint]:
+    """Synthesize continuous daily balance points from activities when M1 chartData is empty.
+
+    Useful for conduit or pass-through accounts (like Backdoor Traditional IRAs)
+    whose current balance is $0 and M1 returns empty chartData.
+    """
+    if not acc_activities:
+        return []
+
+    sorted_acts = sorted(acc_activities, key=lambda x: x.get("date", ""))
+    first_date_str = sorted_acts[0].get("date", "")[:10]
+    if not first_date_str:
+        return []
+
+    try:
+        first_dt = datetime.strptime(first_date_str, "%Y-%m-%d")
+        start_dt = first_dt - timedelta(days=1)
+        end_dt = datetime.strptime(max_date_str, "%Y-%m-%d")
+    except ValueError:
+        return []
+
+    # Find dates when position conversions or transfers out occurred across any account
+    position_transfers_out_dates = set()
+    for aid, act_list in all_activities.items():
+        for a in act_list:
+            if a.get("__typename") == "InvestActivityPositionEntry":
+                title = a.get("title", "").lower()
+                if "conversion" in title or "recharacterization" in title or "transfer" in title:
+                    d = a.get("date", "")[:10]
+                    if d:
+                        position_transfers_out_dates.add(d)
+
+    acts_by_date: Dict[str, List[Dict[str, Any]]] = {}
+    for a in sorted_acts:
+        d = a.get("date", "")[:10]
+        if d:
+            acts_by_date.setdefault(d, []).append(a)
+
+    daily_points: List[AccountBalancePoint] = []
+    curr_balance = 0.0
+    curr_dt = start_dt
+
+    while curr_dt <= end_dt:
+        d_str = curr_dt.strftime("%Y-%m-%d")
+        if d_str in acts_by_date:
+            for act in acts_by_date[d_str]:
+                tname = act.get("__typename")
+                amt = act.get("amount")
+                if tname == "InvestActivityCashEntry" and amt is not None:
+                    try:
+                        curr_balance += float(amt)
+                    except (ValueError, TypeError):
+                        pass
+
+        # If an in-kind position conversion out occurred on this date, remaining balance is transferred out
+        if d_str in position_transfers_out_dates and curr_balance > 0:
+            curr_balance = 0.0
+
+        daily_points.append(AccountBalancePoint(date=d_str, balance=round(curr_balance, 2)))
+        curr_dt += timedelta(days=1)
+
+    return daily_points
+
+
 def parse_m1_dataset(
     raw_data: Dict[str, Any], include_non_cash: bool = False
 ) -> Dict[str, Any]:
@@ -289,6 +359,16 @@ def parse_m1_dataset(
     raw_activities = raw_data.get("activities", {})
     raw_net_worth = raw_data.get("net_worth", {})
 
+    # Determine latest date across the dataset
+    max_date = datetime.now().strftime("%Y-%m-%d")
+    for acc in raw_accounts:
+        data_pts = acc.get("rootPortfolioSlice", {}).get("chartData", {}).get("data", [])
+        if data_pts:
+            max_date = max(max_date, data_pts[-1]["date"][:10])
+    nw_pts = raw_net_worth.get("chartData", {}).get("data", [])
+    if nw_pts:
+        max_date = max(max_date, nw_pts[-1]["date"][:10])
+
     parsed_accounts: List[AccountData] = []
 
     for acc in raw_accounts:
@@ -301,6 +381,13 @@ def parse_m1_dataset(
         daily_balances = parse_daily_balances(chart_data)
 
         raw_acc_activities = raw_activities.get(acc_id, [])
+
+        # If M1 chartData was empty but account has activities, synthesize continuous daily balances
+        if not daily_balances and raw_acc_activities:
+            daily_balances = synthesize_daily_balances_from_activities(
+                raw_acc_activities, raw_activities, max_date
+            )
+
         transactions: List[AccountTransaction] = []
         seen_ids = set()
 
@@ -335,3 +422,4 @@ def parse_m1_dataset(
         "accounts": parsed_accounts,
         "net_worth_balances": net_worth_balances,
     }
+

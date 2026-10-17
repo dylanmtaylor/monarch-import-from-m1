@@ -197,5 +197,37 @@ class TestParser(unittest.TestCase):
         self.assertEqual(len(parsed["net_worth_balances"]), 1)
 
 
+    def test_synthesize_daily_balances(self):
+        from m1_to_monarch.parser import synthesize_daily_balances_from_activities
+        acc_acts = [
+            {
+                "__typename": "InvestActivityCashEntry",
+                "id": "c-1",
+                "title": "Deposit",
+                "amount": 7000.0,
+                "date": "2025-01-02T09:00:00-05:00",
+            },
+            {
+                "__typename": "InvestActivityCashEntry",
+                "id": "c-2",
+                "title": "IRA conversion debited",
+                "amount": -7000.0,
+                "date": "2025-01-10T12:00:00-05:00",
+            },
+        ]
+        pts = synthesize_daily_balances_from_activities(acc_acts, {"acc-1": acc_acts}, "2025-01-15")
+        self.assertEqual(pts[0].date, "2025-01-01")
+        self.assertEqual(pts[0].balance, 0.0)
+        self.assertEqual(pts[1].date, "2025-01-02")
+        self.assertEqual(pts[1].balance, 7000.0)
+        # On Jan 10 converted
+        pt_jan10 = [p for p in pts if p.date == "2025-01-10"][0]
+        self.assertEqual(pt_jan10.balance, 0.0)
+        # End date Jan 15
+        self.assertEqual(pts[-1].date, "2025-01-15")
+        self.assertEqual(pts[-1].balance, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
+
